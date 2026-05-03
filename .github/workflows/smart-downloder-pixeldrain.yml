@@ -1,26 +1,14 @@
-name: 🧠 Smart Downloader (API + Direct)
+name: 🧠 Smart Downloader v2
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک دانلود (مستقیم یا API مثل pixeldrain)'
+        description: 'لینک دانلود (Pixeldrain, Gofile, یا مستقیم)'
         required: true
         type: string
-      service:
-        description: 'نوع لینک'
-        required: false
-        default: 'auto'
-        type: choice
-        options:
-          - auto
-          - direct
-          - pixeldrain
-          - gofile
-          - mediafire
-          - mega
       split_mb:
-        description: 'تقسیم فایل‌ها به قطعه‌های چند MB؟'
+        description: 'تقسیم به قطعه‌های چند MB؟ (0 = تقسیم نشه)'
         required: false
         default: 90
         type: number
@@ -39,236 +27,188 @@ jobs:
       - name: 📦 Setup
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip curl jq wget python3-pip
-          pip install --quiet yt-dlp 2>/dev/null || true
-          
-          mkdir -p downloads tmp
+          sudo apt-get install -y -qq aria2 zip curl jq wget
+          mkdir -p downloads
 
-      - name: 🔍 Analyze URL
-        run: |
-          URL="${{ github.event.inputs.url }}"
-          SERVICE="${{ github.event.inputs.service }}"
-          
-          echo "🔗 Input URL: $URL"
-          echo "🏷️  Service: $SERVICE"
-          echo ""
-          
-          # Auto-detect service if set to auto
-          if [ "$SERVICE" = "auto" ]; then
-            case "$URL" in
-              *pixeldrain.com*)
-                SERVICE="pixeldrain"
-                ;;
-              *gofile.io*)
-                SERVICE="gofile"
-                ;;
-              *mediafire.com*)
-                SERVICE="mediafire"
-                ;;
-              *mega.nz*)
-                SERVICE="mega"
-                ;;
-              *.zip|*.mp4|*.rar|*.7z|*.exe|*.apk)
-                SERVICE="direct"
-                ;;
-            esac
-            echo "🔍 Auto-detected: $SERVICE"
-          fi
-          
-          echo "SERVICE=$SERVICE" >> $GITHUB_ENV
-
-      - name: 📥 Pixeldrain Handler
-        if: env.SERVICE == 'pixeldrain'
+      - name: 🔍 Extract Download Info
         run: |
           URL="${{ github.event.inputs.url }}"
           
-          echo "🌐 Processing Pixeldrain link..."
+          echo "🔗 URL: $URL"
           
-          # Extract file ID from URL
-          # Handle different pixeldrain URL formats:
-          # https://pixeldrain.com/api/file/FILEID/info/zip
-          # https://pixeldrain.com/u/FILEID
-          # https://pixeldrain.com/api/file/FILEID
-          
-          FILE_ID=$(echo "$URL" | grep -oP '(?:/u/|/api/file/)\K[a-zA-Z0-9]+')
-          
-          if [ -z "$FILE_ID" ]; then
-            echo "❌ Could not extract file ID from URL"
-            exit 1
+          # Extract File ID from any Pixeldrain URL format
+          if echo "$URL" | grep -qi "pixeldrain"; then
+            FILE_ID=$(echo "$URL" | grep -oP '(?:/u/|/api/file/)\K[a-zA-Z0-9]+' | head -1)
+            
+            if [ -z "$FILE_ID" ]; then
+              echo "❌ Could not extract file ID"
+              exit 1
+            fi
+            
+            echo "📋 Pixeldrain File ID: $FILE_ID"
+            
+            # Get file info from API
+            echo "🔍 Getting file info..."
+            FILE_INFO=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info")
+            
+            # Extract name and size
+            FILE_NAME=$(echo "$FILE_INFO" | jq -r '.name // empty')
+            if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "null" ]; then
+              FILE_NAME="file_${FILE_ID}"
+            fi
+            
+            # Clean filename for Windows compatibility
+            FILE_NAME=$(echo "$FILE_NAME" | sed 's/[<>:"/\\|?*]/-/g')
+            
+            echo "📁 Name: $FILE_NAME"
+            
+            # Direct download URL
+            DOWNLOAD_URL="https://pixeldrain.com/api/file/$FILE_ID?download"
+            
+          elif echo "$URL" | grep -qi "gofile"; then
+            # Gofile handling
+            FILE_ID=$(echo "$URL" | grep -oP '(?:/d/)\K[a-zA-Z0-9]+')
+            API_INFO=$(curl -s "https://api.gofile.io/getContent?contentId=$FILE_ID")
+            DOWNLOAD_URL=$(echo "$API_INFO" | jq -r '.data.contents[].link // empty' | head -1)
+            FILE_NAME=$(echo "$API_INFO" | jq -r '.data.contents[].name // "download"' | head -1)
+            
+          else
+            # Direct link
+            DOWNLOAD_URL="$URL"
+            FILE_NAME=$(basename "$URL" | cut -d'?' -f1)
           fi
           
-          echo "📋 File ID: $FILE_ID"
-          
-          # Get file info
-          echo "🔍 Fetching file info..."
-          FILE_INFO=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info")
-          
-          FILE_NAME=$(echo "$FILE_INFO" | jq -r '.name // "download"')
-          FILE_SIZE=$(echo "$FILE_INFO" | jq -r '.size // 0')
-          
-          echo "📁 File name: $FILE_NAME"
-          echo "📏 Size: $(( FILE_SIZE / 1024 / 1024 ))MB"
-          
-          # Construct direct download URL
-          DOWNLOAD_URL="https://pixeldrain.com/api/file/$FILE_ID"
-          
-          echo "🔗 Direct URL: $DOWNLOAD_URL"
+          echo "🔗 Download URL: ${DOWNLOAD_URL:0:100}..."
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
 
-      - name: 📥 Direct Download Handler
-        if: env.SERVICE == 'direct'
+      - name: ⬇️ Download with Aria2
         run: |
-          URL="${{ github.event.inputs.url }}"
+          URL="${{ env.DOWNLOAD_URL }}"
+          NAME="${{ env.FILE_NAME }}"
           
-          echo "📥 Direct download..."
-          
-          # Extract filename from URL
-          FILE_NAME=$(basename "$URL" | sed 's/?.*//')
-          echo "📁 Filename: $FILE_NAME"
-          
-          echo "DOWNLOAD_URL=$URL" >> $GITHUB_ENV
-          echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
-
-      - name: 📥 Gofile Handler
-        if: env.SERVICE == 'gofile'
-        run: |
-          URL="${{ github.event.inputs.url }}"
-          
-          echo "🌐 Processing Gofile link..."
-          
-          # Extract file ID
-          FILE_ID=$(echo "$URL" | grep -oP '(?:/d/)\K[a-zA-Z0-9]+')
-          
-          if [ -z "$FILE_ID" ]; then
-            echo "❌ Could not extract file ID"
-            exit 1
-          fi
-          
-          # Get file info via API
-          echo "🔍 Fetching file info..."
-          INFO=$(curl -s "https://api.gofile.io/getContent?contentId=$FILE_ID")
-          
-          DOWNLOAD_URL=$(echo "$INFO" | jq -r '.data.contents[].downloadLink // empty' | head -1)
-          FILE_NAME=$(echo "$INFO" | jq -r '.data.contents[].name // "download"' | head -1)
-          
-          echo "📁 File: $FILE_NAME"
-          echo "🔗 Download URL: ${DOWNLOAD_URL:0:80}..."
-          
-          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
-          echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
-
-      - name: ⬇️ Download File
-        run: |
-          URL="${DOWNLOAD_URL}"
-          FILE_NAME="${FILE_NAME:-download}"
-          SPLIT_MB="${{ github.event.inputs.split_mb }}"
-          
-          echo "⬇️ Starting download..."
-          echo "🔗 URL: ${URL:0:100}..."
-          echo "📁 Saving as: $FILE_NAME"
+          echo "⬇️ Downloading: $NAME"
           echo ""
           
-          # Clean filename
-          SAFE_NAME=$(echo "$FILE_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
-          
-          # Try aria2c first (faster)
-          if aria2c \
+          # Download with aria2c with proper headers
+          aria2c \
             --split=16 \
             --max-connection-per-server=16 \
             --min-split-size=1M \
-            --max-tries=5 \
-            --retry-wait=5 \
-            --dir="tmp" \
-            --out="$SAFE_NAME" \
-            "$URL" 2>&1 | tail -5; then
-            
-            echo "✅ Download complete with aria2"
-            
-          else
-            echo "⚠️ aria2 failed, trying curl..."
-            
-            # Fallback to curl
-            curl -L --retry 5 --retry-delay 5 -o "tmp/$SAFE_NAME" "$URL" 2>&1
-            
-            if [ -f "tmp/$SAFE_NAME" ]; then
-              echo "✅ Download complete with curl"
-            else
-              echo "❌ All download methods failed"
-              exit 1
-            fi
-          fi
+            --max-tries=10 \
+            --retry-wait=10 \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --dir="downloads" \
+            --out="$NAME" \
+            --allow-overwrite=true \
+            --continue=true \
+            "$URL" 2>&1 | grep -E "(\[#|Download|download|OK|ERR)"
           
-          # Move to downloads
-          mv "tmp/$SAFE_NAME" "downloads/$SAFE_NAME" 2>/dev/null || true
-          
-          # Check file
-          if [ -f "downloads/$SAFE_NAME" ]; then
-            SIZE=$(stat -c%s "downloads/$SAFE_NAME")
+          # Verify download
+          if [ -f "downloads/$NAME" ]; then
+            SIZE=$(stat -c%s "downloads/$NAME" 2>/dev/null || echo 0)
             echo ""
-            echo "📦 File size: $(( SIZE / 1024 / 1024 ))MB"
+            echo "📦 Downloaded: $(( SIZE / 1024 / 1024 ))MB"
+            
+            # Check if it's an HTML/JSON error page (pixeldrain sometimes returns errors)
+            if [ $SIZE -lt 10000 ]; then
+              echo "⚠️ File too small, might be error page. Checking..."
+              head -c 500 "downloads/$NAME"
+              
+              # Try alternative URL format
+              if grep -q "error\|html\|json" "downloads/$NAME" 2>/dev/null; then
+                echo "🔄 Retrying with different URL format..."
+                rm "downloads/$NAME"
+                
+                FILE_ID=$(echo "$URL" | grep -oP '[a-zA-Z0-9]+(?=\?)')
+                NEW_URL="https://pixeldrain.com/api/file/${FILE_ID}?download"
+                
+                curl -L -H "User-Agent: Mozilla/5.0" -o "downloads/$NAME" "$NEW_URL"
+              fi
+            fi
+          else
+            echo "❌ Download failed"
+            exit 1
           fi
-          
-          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
-      - name: 📦 Process & Split
+      - name: 📦 Split Files
         run: |
           SPLIT_MB="${{ github.event.inputs.split_mb }}"
           
+          echo "📦 Processing files..."
+          echo ""
+          
           cd downloads
           
-          for FILE in *; do
-            [ -f "$FILE" ] || continue
+          # Only process new files (created in last 5 minutes)
+          for FILE in $(find . -maxdepth 1 -type f -newer /tmp -name "*" | sed 's|^./||'); do
+            [ -z "$FILE" ] && continue
             
-            SIZE=$(stat -c%s "$FILE")
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
             SIZE_MB=$(( SIZE / 1024 / 1024 ))
+            
+            if [ $SIZE -lt 10000 ]; then
+              echo "⏭️  Skipping small file: $FILE ($SIZE bytes)"
+              continue
+            fi
             
             echo "📁 $FILE ($SIZE_MB MB)"
             
             if [ "$SPLIT_MB" != "0" ] && [ $SIZE -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
               echo "   ✂️ Splitting into ${SPLIT_MB}MB parts..."
-              
-              # Create zip with split
               zip -0 -s "${SPLIT_MB}m" "${FILE}.zip" "$FILE"
               rm "$FILE"
-              
-              PART_COUNT=$(ls "${FILE}.zip".z* 2>/dev/null | wc -l)
-              echo "   ✅ $PART_COUNT parts created"
+              echo "   ✅ Done"
             fi
           done
           
           echo ""
-          echo "📋 Final files:"
-          ls -lh
+          echo "📋 Files in downloads/:"
+          ls -lhS
 
-      - name: 📤 Upload to Repository
+      - name: 📤 Commit to Repository
         run: |
+          # Check if there are files to upload
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           
           git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
           
-          git add downloads/
+          # Find new files
+          NEW_FILES=$(git ls-files --others --exclude-standard downloads/ 2>/dev/null)
           
-          if git diff --staged --quiet; then
-            echo "No new files to upload"
-            exit 0
+          if [ -z "$NEW_FILES" ]; then
+            echo "❌ No new files found!"
+            echo "Current downloads/:"
+            ls -la downloads/
+            exit 1
           fi
           
-          # Count and commit
-          TOTAL=$(git diff --staged --name-only | wc -l)
-          echo "📤 Uploading $TOTAL files..."
+          # Count files
+          TOTAL=$(echo "$NEW_FILES" | wc -l)
+          echo "📤 Uploading $TOTAL file(s)..."
+          echo "$NEW_FILES"
+          echo ""
           
-          # Commit in batches of 5
-          for ((i=0; i<TOTAL; i+=5)); do
-            BATCH=$((i/5 + 1))
-            git commit -m "📥 [SmartDL] Download batch $BATCH [skip ci]" 2>/dev/null || true
-            git push origin ${{ github.ref_name }} 2>/dev/null
-            [ $? -ne 0 ] && git pull --rebase && git push
-            sleep 2
+          # Upload in batches
+          COUNTER=0
+          BATCH_NUM=1
+          
+          echo "$NEW_FILES" | while read -r FILE; do
+            [ -z "$FILE" ] && continue
+            
+            git add "$FILE"
+            COUNTER=$((COUNTER + 1))
+            
+            if [ $((COUNTER % 5)) -eq 0 ] || [ $COUNTER -eq $TOTAL ]; then
+              echo "📤 Batch $BATCH_NUM ($COUNTER/$TOTAL)"
+              git commit -m "📥 [SmartDL] Part $BATCH_NUM [skip ci]" 2>/dev/null || true
+              git push origin ${{ github.ref_name }} 2>/dev/null
+              sleep 2
+              BATCH_NUM=$((BATCH_NUM + 1))
+            fi
           done
           
-          echo ""
-          echo "╔══════════════════════════════════╗"
-          echo "║   ✅ Download Complete!         ║"
-          echo "╚══════════════════════════════════╝"
+          echo "✅ Upload complete!"
