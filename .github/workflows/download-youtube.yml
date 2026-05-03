@@ -1,4 +1,4 @@
-name: دانلود از یوتیوب و ذخیره در ریپو
+name: 🎬 دانلود از یوتیوب + ذخیره در ریپو
 
 on:
   workflow_dispatch:
@@ -6,71 +6,149 @@ on:
       youtube_url:
         description: 'لینک ویدیوی یوتیوب'
         required: true
+        type: string
+      mode:
+        description: 'حالت دانلود'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - zip
+      split_threshold_mb:
+        description: 'تقسیم فایل‌های بزرگتر از این مقدار (MB) - 0 یعنی تقسیم نشه'
+        required: false
+        default: 90
+        type: number
 
 jobs:
-  download-and-save:
+  youtube-download:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Python and install yt-dlp
+      - name: نصب ابزارهای مورد نیاز
         run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip
           python3 -m pip install --upgrade pip
           pip install yt-dlp
 
-      - name: دریافت لینک مستقیم دانلود
+      - name: 🏷️ AVASAM YouTube Downloader
+        run: |
+          echo "🏷️  AVASAM - YouTube Download Solution"
+          echo "🌐 https://avasam.ir"
+          echo ""
+
+      - name: 🎯 استخراج لینک مستقیم از یوتیوب
         id: get_url
         run: |
-          # بهترین کیفیت ویدیو+صدا رو پیدا می‌کنه و لینک مستقیمش رو می‌ده
-          DIRECT_URL=$(yt-dlp -f "best" -g "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          echo "🔍 در حال بررسی لینک یوتیوب..."
+          # استخراج اسم ویدیو برای نام فایل
+          VIDEO_TITLE=$(yt-dlp --get-title "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          echo "📹 عنوان ویدیو: $VIDEO_TITLE"
+          
+          # گرفتن لینک مستقیم بهترین کیفیت (تا 1080p برای سازگاری)
+          DIRECT_URL=$(yt-dlp -f "best[height<=1080]" -g "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          
           if [ -z "$DIRECT_URL" ]; then
-            echo "❌ خطا: نتونستم لینک مستقیم ویدیو رو پیدا کنم. لینک یوتیوب رو چک کن."
+            echo "❌ خطا: نتونستم لینک مستقیم رو استخراج کنم."
+            echo "🔸 ممکنه لینک مسدود شده باشه یا نیاز به کوکی داشته باشه."
             exit 1
           fi
-          echo "✅ لینک مستقیم پیدا شد."
+          
+          echo "✅ لینک مستقیم با موفقیت استخراج شد."
           echo "direct_url=${DIRECT_URL}" >> $GITHUB_OUTPUT
+          echo "video_title=${VIDEO_TITLE}" >> $GITHUB_OUTPUT
 
-      - name: نمایش و ذخیره لینک مستقیم (برای دیباگ)
+      - name: ⬇️ دانلود ویدیو با aria2
         run: |
-          echo "لینک مستقیم استخراج شده:"
-          echo "${{ steps.get_url.outputs.direct_url }}"
-          # این لینک رو به فایل url.txt اضافه می‌کنیم تا workflow دانلودر اصلی ازش استفاده کنه
-          echo "${{ steps.get_url.outputs.direct_url }}" > url.txt
-
-      # از اینجا به بعد، از Workflow اصلی خودت برای دانلود استفاده می‌کنیم
-      - name: دانلود فایل با Aria2 و ذخیره در ریپو
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 120
-          max_attempts: 3
-          command: |
-            # ساخت پوشه downloads اگر وجود نداشته باشد
-            mkdir -p downloads
-            cd downloads
-            # خواندن لینک از فایل url.txt
-            URL=$(cat ../url.txt)
-            # دانلود با aria2c
-            aria2c -x 16 -s 16 --summary-interval=0 "$URL"
-
-      - name: فشرده‌سازی و پارتیشن‌بندی فایل(ها)
-        run: |
-          cd downloads
-          # پیدا کردن آخرین فایل دانلود شده (فیلتر کردن فایل‌های غیر zip)
-          LAST_FILE=$(ls -t | head -n1)
-          if [ -z "$LAST_FILE" ]; then
-            echo "❌ هیچ فایلی پیدا نشد."
-            exit 1
+          MODE="${{ github.event.inputs.mode }}"
+          DIRECT_URL="${{ steps.get_url.outputs.direct_url }}"
+          VIDEO_TITLE="${{ steps.get_url.outputs.video_title }}"
+          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+          
+          echo "🏷️  AVASAM (https://avasam.ir)"
+          echo "⬇️ در حال دانلود: $VIDEO_TITLE"
+          
+          # تمیز کردن اسم فایل
+          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | tr ' ' '_')
+          FILENAME="${SAFE_TITLE}.mp4"
+          
+          mkdir -p downloads tmp_downloads
+          
+          echo "📥 دانلود به عنوان: $FILENAME"
+          aria2c \
+            --split=16 \
+            --max-connection-per-server=16 \
+            --min-split-size=1M \
+            --dir="tmp_downloads" \
+            --out="$FILENAME" \
+            "$DIRECT_URL"
+          
+          # پردازش فایل دانلود شده مثل Workflow اصلی
+          if [ "$MODE" = "zip" ]; then
+            ARCHIVE_NAME="downloads/${SAFE_TITLE}_$(date +%Y%m%d_%H%M%S).zip"
+            echo "📦 ایجاد آرشیو zip: $ARCHIVE_NAME"
+            zip -j "$ARCHIVE_NAME" tmp_downloads/*
+            rm -rf tmp_downloads
+          else
+            for FILE in tmp_downloads/*; do
+              [ -f "$FILE" ] || continue
+              SIZE=$(stat -c%s "$FILE")
+              BASENAME=$(basename "$FILE")
+              
+              if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+                echo "✂️ $BASENAME حجمش $(( SIZE / 1024 / 1024 ))MB هست — تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB"
+                zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
+                echo "✅ تعداد قطعه‌ها: $(ls downloads/${BASENAME}.z* 2>/dev/null | wc -l)"
+              else
+                cp "$FILE" "downloads/$BASENAME"
+              fi
+            done
+            rm -rf tmp_downloads
           fi
-          echo "📦 فایل اصلی: $LAST_FILE"
-          # فشرده‌سازی با 7z و تقسیم به پارت‌های ۹۰ مگابایتی
-          7z a -v90m "${LAST_FILE}.zip" "$LAST_FILE"
-          rm "$LAST_FILE" # پاک کردن فایل اصلی برای صرفه‌جویی در فضای مخزن
 
-      - name: Commit and Push changes
+      - name: 📤 ذخیره‌سازی در گیت‌هاب (AVASAM)
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
-          git commit -m "✅ دانلود و ذخیره ویدیو از یوتیوب - $(date +'%Y-%m-%d %H:%M:%S')"
-          git push
+          BRANCH="${GITHUB_REF_NAME}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          echo "🏷️  AVASAM (https://avasam.ir) - ذخیره‌سازی فایل‌ها"
+          
+          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
+          
+          TOTAL=${#ALL_FILES[@]}
+          echo "📦 تعداد کل فایل‌های جدید: $TOTAL"
+          
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "ℹ️ فایل جدیدی برای ذخیره وجود نداره."
+            exit 0
+          fi
+          
+          BATCH_SIZE=5
+          BATCH_NUM=0
+          
+          for (( i=0; i<TOTAL; i+=BATCH_SIZE )); do
+            BATCH_NUM=$(( BATCH_NUM + 1 ))
+            BATCH=("${ALL_FILES[@]:i:BATCH_SIZE}")
+            
+            echo "🚀 ذخیره گروه $BATCH_NUM: فایل‌های $((i+1)) تا $(( i + ${#BATCH[@]} )) از $TOTAL"
+            
+            git add "${BATCH[@]}"
+            git commit -m "[AVASAM] 🎬 دانلود از یوتیوب — گروه $BATCH_NUM [skip ci]"
+            
+            git pull --rebase origin "$BRANCH"
+            git push origin HEAD:"$BRANCH"
+            
+            echo "✅ گروه $BATCH_NUM ذخیره شد"
+          done
+          
+          echo "🎉 همه $TOTAL فایل در $BATCH_NUM گروه ذخیره شدن — AVASAM (https://avasam.ir)"
