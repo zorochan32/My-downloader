@@ -37,28 +37,59 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 zip
           python3 -m pip install --upgrade pip
-          pip install yt-dlp
+          pip install --upgrade yt-dlp
+          echo "✅ yt-dlp version: $(yt-dlp --version)"
 
       - name: 🏷️ AVASAM YouTube Downloader
         run: |
           echo "🏷️  AVASAM - YouTube Download Solution"
           echo "🌐 https://avasam.ir"
+          echo "📅 $(date)"
           echo ""
 
       - name: 🎯 استخراج لینک مستقیم از یوتیوب
         id: get_url
         run: |
-          echo "🔍 در حال بررسی لینک یوتیوب..."
-          # استخراج اسم ویدیو برای نام فایل
-          VIDEO_TITLE=$(yt-dlp --get-title "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          YT_URL="${{ github.event.inputs.youtube_url }}"
+          echo "🔗 لینک دریافتی: $YT_URL"
+          echo ""
+          
+          # اول چک می‌کنیم ببینیم اصلاً yt-dlp می‌تونه ویدیو رو تشخیص بده
+          echo "🔍 در حال بررسی ویدیو..."
+          VIDEO_INFO=$(yt-dlp --dump-json --no-playlist "$YT_URL" 2>/tmp/yt-error.log)
+          YT_EXIT_CODE=$?
+          
+          if [ $YT_EXIT_CODE -ne 0 ]; then
+            echo "❌ خطا در پردازش لینک یوتیوب:"
+            cat /tmp/yt-error.log
+            echo ""
+            echo "🔸 راه‌حل‌های احتمالی:"
+            echo "  1. لینک رو چک کن (باید شبیه https://www.youtube.com/watch?v=XXXXX باشه)"
+            echo "  2. ویدیو ممکنه خصوصی یا محدود به منطقه باشه"
+            echo "  3. دوباره تلاش کن (محدودیت موقت یوتیوب)"
+            exit 1
+          fi
+          
+          VIDEO_TITLE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])" 2>/dev/null)
           echo "📹 عنوان ویدیو: $VIDEO_TITLE"
+          echo ""
           
-          # گرفتن لینک مستقیم بهترین کیفیت (تا 1080p برای سازگاری)
-          DIRECT_URL=$(yt-dlp -f "best[height<=1080]" -g "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          # گرفتن لینک مستقیم - اول فرمت mp4 با کیفیت بالا
+          echo "🎯 در حال استخراج لینک مستقیم..."
+          DIRECT_URL=$(yt-dlp -f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" -g "$YT_URL" 2>/tmp/yt-url-error.log)
+          URL_EXIT_CODE=$?
           
-          if [ -z "$DIRECT_URL" ]; then
-            echo "❌ خطا: نتونستم لینک مستقیم رو استخراج کنم."
-            echo "🔸 ممکنه لینک مسدود شده باشه یا نیاز به کوکی داشته باشه."
+          if [ $URL_EXIT_CODE -ne 0 ] || [ -z "$DIRECT_URL" ]; then
+            echo "⚠️ روش اول جواب نداد، روش دوم رو امتحان می‌کنم..."
+            # روش دوم: هر چی که در دسترسه
+            DIRECT_URL=$(yt-dlp -f "best" -g "$YT_URL" 2>/tmp/yt-url-error2.log)
+            URL_EXIT_CODE=$?
+          fi
+          
+          if [ $URL_EXIT_CODE -ne 0 ] || [ -z "$DIRECT_URL" ]; then
+            echo "❌ نتونستم لینک مستقیم رو استخراج کنم:"
+            cat /tmp/yt-url-error.log 2>/dev/null
+            cat /tmp/yt-url-error2.log 2>/dev/null
             exit 1
           fi
           
@@ -78,16 +109,24 @@ jobs:
           echo "⬇️ در حال دانلود: $VIDEO_TITLE"
           
           # تمیز کردن اسم فایل
-          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | tr ' ' '_')
+          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | sed 's/ /_/g')
           FILENAME="${SAFE_TITLE}.mp4"
           
           mkdir -p downloads tmp_downloads
           
-          echo "📥 دانلود به عنوان: $FILENAME"
+          echo "📥 نام فایل: $FILENAME"
+          echo "🔗 لینک دانلود: ${DIRECT_URL:0:100}..."
+          echo ""
+          
+          # دانلود با تنظیمات بهینه
           aria2c \
             --split=16 \
             --max-connection-per-server=16 \
             --min-split-size=1M \
+            --max-tries=5 \
+            --retry-wait=5 \
+            --timeout=30 \
+            --connect-timeout=10 \
             --dir="tmp_downloads" \
             --out="$FILENAME" \
             "$DIRECT_URL"
@@ -114,6 +153,8 @@ jobs:
             done
             rm -rf tmp_downloads
           fi
+          
+          echo "✅ دانلود و پردازش تموم شد."
 
       - name: 📤 ذخیره‌سازی در گیت‌هاب (AVASAM)
         run: |
@@ -143,7 +184,7 @@ jobs:
             echo "🚀 ذخیره گروه $BATCH_NUM: فایل‌های $((i+1)) تا $(( i + ${#BATCH[@]} )) از $TOTAL"
             
             git add "${BATCH[@]}"
-            git commit -m "[AVASAM] 🎬 دانلود از یوتیوب — گروه $BATCH_NUM [skip ci]"
+            git commit -m "[AVASAM] 🎬 دانلود از یوتیوب — $(date +'%Y-%m-%d %H:%M') [skip ci]"
             
             git pull --rebase origin "$BRANCH"
             git push origin HEAD:"$BRANCH"
@@ -151,4 +192,5 @@ jobs:
             echo "✅ گروه $BATCH_NUM ذخیره شد"
           done
           
-          echo "🎉 همه $TOTAL فایل در $BATCH_NUM گروه ذخیره شدن — AVASAM (https://avasam.ir)"
+          echo "🎉 همه $TOTAL فایل در $BATCH_NUM گروه ذخیره شدن"
+          echo "🏷️  AVASAM - https://avasam.ir"
