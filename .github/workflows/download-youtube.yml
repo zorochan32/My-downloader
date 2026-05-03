@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'لینک ویدیوی یوتیوب'
+        description: 'لینک ویدیوی یوتیوب (فقط ویدیوی تکی، نه پلی‌لیست)'
         required: true
         type: string
       mode:
@@ -35,145 +35,133 @@ jobs:
       - name: نصب ابزارهای مورد نیاز
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip
+          sudo apt-get install -y aria2 zip ffmpeg
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
           echo "✅ yt-dlp version: $(yt-dlp --version)"
+          echo "✅ ffmpeg version: $(ffmpeg -version | head -n1)"
 
-      - name: 🏷️ AVASAM YouTube Downloader
-        run: |
-          echo "🏷️  AVASAM - YouTube Download Solution"
-          echo "🌐 https://avasam.ir"
-          echo "📅 $(date)"
-          echo ""
-
-      - name: 🎯 استخراج لینک مستقیم از یوتیوب
-        id: get_url
+      - name: 🎯 استخراج و دانلود از یوتیوب
         run: |
           YT_URL="${{ github.event.inputs.youtube_url }}"
-          echo "🔗 لینک دریافتی: $YT_URL"
-          echo ""
-          
-          # اول چک می‌کنیم ببینیم اصلاً yt-dlp می‌تونه ویدیو رو تشخیص بده
-          echo "🔍 در حال بررسی ویدیو..."
-          VIDEO_INFO=$(yt-dlp --dump-json --no-playlist "$YT_URL" 2>/tmp/yt-error.log)
-          YT_EXIT_CODE=$?
-          
-          if [ $YT_EXIT_CODE -ne 0 ]; then
-            echo "❌ خطا در پردازش لینک یوتیوب:"
-            cat /tmp/yt-error.log
-            echo ""
-            echo "🔸 راه‌حل‌های احتمالی:"
-            echo "  1. لینک رو چک کن (باید شبیه https://www.youtube.com/watch?v=XXXXX باشه)"
-            echo "  2. ویدیو ممکنه خصوصی یا محدود به منطقه باشه"
-            echo "  3. دوباره تلاش کن (محدودیت موقت یوتیوب)"
-            exit 1
-          fi
-          
-          VIDEO_TITLE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])" 2>/dev/null)
-          echo "📹 عنوان ویدیو: $VIDEO_TITLE"
-          echo ""
-          
-          # گرفتن لینک مستقیم - اول فرمت mp4 با کیفیت بالا
-          echo "🎯 در حال استخراج لینک مستقیم..."
-          DIRECT_URL=$(yt-dlp -f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" -g "$YT_URL" 2>/tmp/yt-url-error.log)
-          URL_EXIT_CODE=$?
-          
-          if [ $URL_EXIT_CODE -ne 0 ] || [ -z "$DIRECT_URL" ]; then
-            echo "⚠️ روش اول جواب نداد، روش دوم رو امتحان می‌کنم..."
-            # روش دوم: هر چی که در دسترسه
-            DIRECT_URL=$(yt-dlp -f "best" -g "$YT_URL" 2>/tmp/yt-url-error2.log)
-            URL_EXIT_CODE=$?
-          fi
-          
-          if [ $URL_EXIT_CODE -ne 0 ] || [ -z "$DIRECT_URL" ]; then
-            echo "❌ نتونستم لینک مستقیم رو استخراج کنم:"
-            cat /tmp/yt-url-error.log 2>/dev/null
-            cat /tmp/yt-url-error2.log 2>/dev/null
-            exit 1
-          fi
-          
-          echo "✅ لینک مستقیم با موفقیت استخراج شد."
-          echo "direct_url=${DIRECT_URL}" >> $GITHUB_OUTPUT
-          echo "video_title=${VIDEO_TITLE}" >> $GITHUB_OUTPUT
-
-      - name: ⬇️ دانلود ویدیو با aria2
-        run: |
           MODE="${{ github.event.inputs.mode }}"
-          DIRECT_URL="${{ steps.get_url.outputs.direct_url }}"
-          VIDEO_TITLE="${{ steps.get_url.outputs.video_title }}"
           SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
           
-          echo "🏷️  AVASAM (https://avasam.ir)"
-          echo "⬇️ در حال دانلود: $VIDEO_TITLE"
+          echo "🏷️  AVASAM - YouTube Download Solution"
+          echo "🌐 https://avasam.ir"
+          echo "🔗 لینک: $YT_URL"
+          echo ""
+          
+          # حذف پارامترهای اضافی مثل list= از لینک
+          CLEAN_URL=$(echo "$YT_URL" | sed 's/&list=.*//' | sed 's/?list=.*//')
+          echo "🔗 لینک تمیز شده: $CLEAN_URL"
+          echo ""
+          
+          mkdir -p downloads
+          
+          # روش جدید: مستقیماً با yt-dlp دانلود کن، بعد با همون سیستم قبلی پردازش کن
+          echo "📥 در حال دانلود با yt-dlp..."
+          
+          # اول عنوان ویدیو رو می‌گیریم
+          VIDEO_TITLE=$(yt-dlp --get-title --no-playlist "$CLEAN_URL" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "❌ خطا در دریافت عنوان:"
+            echo "$VIDEO_TITLE"
+            echo ""
+            echo "🔸 نکته: مطمئن شو لینک ویدیوی تکی باشه، نه پلی‌لیست"
+            exit 1
+          fi
+          
+          echo "📹 عنوان: $VIDEO_TITLE"
           
           # تمیز کردن اسم فایل
-          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | sed 's/ /_/g')
-          FILENAME="${SAFE_TITLE}.mp4"
+          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | sed 's/ /_/g' | cut -c1-100)
           
-          mkdir -p downloads tmp_downloads
+          # دانلود مستقیم با yt-dlp (با فرمت mp4)
+          echo "⬇️ در حال دانلود..."
+          yt-dlp \
+            -f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+            --no-playlist \
+            --merge-output-format mp4 \
+            -o "downloads/${SAFE_TITLE}.mp4" \
+            "$CLEAN_URL" 2>&1 | tail -20
           
-          echo "📥 نام فایل: $FILENAME"
-          echo "🔗 لینک دانلود: ${DIRECT_URL:0:100}..."
-          echo ""
+          DOWNLOAD_EXIT=$?
           
-          # دانلود با تنظیمات بهینه
-          aria2c \
-            --split=16 \
-            --max-connection-per-server=16 \
-            --min-split-size=1M \
-            --max-tries=5 \
-            --retry-wait=5 \
-            --timeout=30 \
-            --connect-timeout=10 \
-            --dir="tmp_downloads" \
-            --out="$FILENAME" \
-            "$DIRECT_URL"
-          
-          # پردازش فایل دانلود شده مثل Workflow اصلی
-          if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="downloads/${SAFE_TITLE}_$(date +%Y%m%d_%H%M%S).zip"
-            echo "📦 ایجاد آرشیو zip: $ARCHIVE_NAME"
-            zip -j "$ARCHIVE_NAME" tmp_downloads/*
-            rm -rf tmp_downloads
-          else
-            for FILE in tmp_downloads/*; do
-              [ -f "$FILE" ] || continue
-              SIZE=$(stat -c%s "$FILE")
-              BASENAME=$(basename "$FILE")
-              
-              if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-                echo "✂️ $BASENAME حجمش $(( SIZE / 1024 / 1024 ))MB هست — تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB"
-                zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
-                echo "✅ تعداد قطعه‌ها: $(ls downloads/${BASENAME}.z* 2>/dev/null | wc -l)"
-              else
-                cp "$FILE" "downloads/$BASENAME"
-              fi
-            done
-            rm -rf tmp_downloads
+          if [ $DOWNLOAD_EXIT -ne 0 ]; then
+            echo ""
+            echo "❌ خطا در دانلود. کد خروج: $DOWNLOAD_EXIT"
+            echo "🔸 در حال تلاش با روش جایگزین..."
+            
+            # روش جایگزین: دانلود هر فرمتی که باشه
+            yt-dlp \
+              -f "best" \
+              --no-playlist \
+              -o "downloads/${SAFE_TITLE}.%(ext)s" \
+              "$CLEAN_URL" 2>&1 | tail -20
+            
+            if [ $? -ne 0 ]; then
+              echo "❌ روش جایگزین هم جواب نداد."
+              exit 1
+            fi
           fi
           
-          echo "✅ دانلود و پردازش تموم شد."
+          echo "✅ دانلود تموم شد."
+          
+          # پیدا کردن فایل دانلود شده
+          DOWNLOADED_FILE=$(ls -t downloads/ | head -n1)
+          FILE_PATH="downloads/$DOWNLOADED_FILE"
+          FILE_SIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
+          
+          echo "📦 فایل: $DOWNLOADED_FILE"
+          echo "📏 حجم: $(( FILE_SIZE / 1024 / 1024 ))MB"
+          
+          # اگه حالت zip باشه یا حجم فایل از حد مجاز بیشتر باشه، تقسیمش می‌کنیم
+          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+          
+          if [ "$MODE" = "zip" ]; then
+            echo "📦 ایجاد آرشیو zip..."
+            ARCHIVE_NAME="downloads/${SAFE_TITLE}_$(date +%Y%m%d_%H%M%S).zip"
+            zip -j "$ARCHIVE_NAME" "$FILE_PATH"
+            rm "$FILE_PATH"
+            echo "✅ آرشیو ساخته شد: $ARCHIVE_NAME"
+            
+          elif [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+            echo "✂️ حجم فایل از ${SPLIT_THRESHOLD_MB}MB بیشتره — تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB"
+            zip -0 -s "${SPLIT_THRESHOLD_MB}m" "${FILE_PATH}.zip" -j "$FILE_PATH"
+            rm "$FILE_PATH"
+            echo "✅ تعداد قطعه‌ها: $(ls downloads/${DOWNLOADED_FILE}.z* 2>/dev/null | wc -l)"
+          fi
+          
+          echo ""
+          echo "📋 فایل‌های موجود در پوشه downloads:"
+          ls -lh downloads/
 
-      - name: 📤 ذخیره‌سازی در گیت‌هاب (AVASAM)
+      - name: 📤 ذخیره‌سازی در گیت‌هاب
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           
-          echo "🏷️  AVASAM (https://avasam.ir) - ذخیره‌سازی فایل‌ها"
+          echo "📤 در حال ذخیره‌سازی فایل‌ها..."
           
+          # لیست فایل‌های جدید و تغییر یافته
           mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
           
           TOTAL=${#ALL_FILES[@]}
-          echo "📦 تعداد کل فایل‌های جدید: $TOTAL"
+          echo "📦 تعداد فایل‌های جدید: $TOTAL"
           
           if [ "$TOTAL" -eq 0 ]; then
-            echo "ℹ️ فایل جدیدی برای ذخیره وجود نداره."
+            echo "ℹ️ فایل جدیدی وجود نداره."
             exit 0
           fi
           
+          # نمایش فایل‌ها
+          for f in "${ALL_FILES[@]}"; do
+            echo "  - $f"
+          done
+          
+          # ارسال گروهی (هر 5 تا)
           BATCH_SIZE=5
           BATCH_NUM=0
           
@@ -181,16 +169,17 @@ jobs:
             BATCH_NUM=$(( BATCH_NUM + 1 ))
             BATCH=("${ALL_FILES[@]:i:BATCH_SIZE}")
             
-            echo "🚀 ذخیره گروه $BATCH_NUM: فایل‌های $((i+1)) تا $(( i + ${#BATCH[@]} )) از $TOTAL"
+            echo "🚀 گروه $BATCH_NUM: ارسال $((i+1)) تا $(( i + ${#BATCH[@]} )) از $TOTAL"
             
             git add "${BATCH[@]}"
-            git commit -m "[AVASAM] 🎬 دانلود از یوتیوب — $(date +'%Y-%m-%d %H:%M') [skip ci]"
+            git commit -m "🎬 [YouTube] ${VIDEO_TITLE:-video} — $(date +'%Y-%m-%d %H:%M')"
             
-            git pull --rebase origin "$BRANCH"
+            git pull --rebase origin "$BRANCH" 2>/dev/null || true
             git push origin HEAD:"$BRANCH"
             
             echo "✅ گروه $BATCH_NUM ذخیره شد"
           done
           
-          echo "🎉 همه $TOTAL فایل در $BATCH_NUM گروه ذخیره شدن"
-          echo "🏷️  AVASAM - https://avasam.ir"
+          echo ""
+          echo "🎉 همه فایل‌ها با موفقیت ذخیره شدن!"
+          echo "🔗 https://github.com/${{ github.repository }}/tree/main/downloads"
