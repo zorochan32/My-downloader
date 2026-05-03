@@ -1,28 +1,20 @@
-name: 🎬 دانلود از یوتیوب + ذخیره در ریپو
+name: 🎬 YouTube Downloader
 
 on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'لینک ویدیوی یوتیوب (فقط ویدیوی تکی)'
+        description: 'لینک ویدیوی یوتیوب'
         required: true
         type: string
-      mode:
-        description: 'حالت دانلود'
-        required: false
-        default: 'normal'
-        type: choice
-        options:
-          - normal
-          - zip
-      split_threshold_mb:
-        description: 'تقسیم فایل‌های بزرگتر از این مقدار (MB)'
+      split_mb:
+        description: 'حداکثر حجم هر فایل (MB)'
         required: false
         default: 90
         type: number
 
 jobs:
-  youtube-download:
+  download:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,175 +24,130 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 📦 نصب پیش‌نیازها
+      - name: 📦 Setup
         run: |
-          echo "📦 در حال نصب بسته‌های مورد نیاز..."
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip ffmpeg python3-pip wget curl
+          echo "📦 Installing packages..."
+          sudo apt-get update -qq && sudo apt-get install -y -qq aria2 zip ffmpeg python3-pip curl
           
-          echo "🐍 نصب yt-dlp..."
-          pip install --upgrade --quiet yt-dlp
+          # Install Deno (JS runtime needed by yt-dlp)
+          curl -fsSL https://deno.land/install.sh | sh -s -- -y
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
           
-          echo "✅ نسخه‌ها:"
-          yt-dlp --version
-          ffmpeg -version 2>&1 | head -n1
+          pip install --quiet --upgrade yt-dlp
+          
+          echo "✅ yt-dlp: $(yt-dlp --version)"
+          echo "✅ Deno: $(deno --version 2>&1 | head -1)"
 
-      - name: 🧹 آماده‌سازی
+      - name: 🎥 Download from YouTube
         run: |
-          echo "🏷️  AVASAM - YouTube Downloader"
-          echo "🌐 https://avasam.ir"
+          URL="${{ github.event.inputs.youtube_url }}"
+          SPLIT_MB="${{ github.event.inputs.split_mb }}"
+          
+          echo "🎬 AVASAM YouTube Downloader"
+          echo "🔗 URL: $URL"
           echo ""
           
           mkdir -p downloads
           
-          YT_URL="${{ github.event.inputs.youtube_url }}"
-          echo "🔗 لینک اصلی: $YT_URL"
-          
-          # تمیز کردن لینک
-          CLEAN_URL=$(echo "$YT_URL" | sed -E 's/[&?]list=[^&]*//g' | sed -E 's/[&?]si=[^&]*//g' | sed -E 's/[&?]t=[^&]*//g')
-          echo "🔗 لینک تمیز: $CLEAN_URL"
-          echo "CLEAN_URL=$CLEAN_URL" >> $GITHUB_ENV
-
-      - name: 🔍 تست دسترسی به یوتیوب
-        id: check
-        run: |
-          echo "🔍 تست اتصال به یوتیوب..."
-          
-          # تست با yt-dlp --simulate
-          yt-dlp --simulate --no-playlist --print "%(title)s" "${{ env.CLEAN_URL }}" 2>&1 || {
-            echo ""
-            echo "⚠️ تست اول ناموفق بود. تست دوم با user-agent سفارشی..."
-            
-            yt-dlp \
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-              --simulate \
-              --no-playlist \
-              --print "%(title)s" \
-              "${{ env.CLEAN_URL }}" 2>&1 || {
-              
-              echo ""
-              echo "❌ نتونستم به یوتیوب وصل بشم."
-              echo "🔸 پیشنهاد: یه بار دیگه امتحان کن یا لینک رو چک کن."
-              exit 1
-            }
-          }
-          
-          echo "✅ اتصال به یوتیوب برقراره!"
-
-      - name: ⬇️ دانلود ویدیو
-        run: |
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          MODE="${{ github.event.inputs.mode }}"
-          
-          echo "📥 شروع دانلود..."
-          
-          # دانلود با yt-dlp
+          # New method: Use yt-dlp with all tricks
           yt-dlp \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+            --extractor-args "youtube:player_client=android_embed,web" \
             --no-playlist \
-            --format "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+            --format "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best[height<=1080]" \
             --merge-output-format mp4 \
-            --output "downloads/%(title).100s.%(ext)s" \
-            --restrict-filenames \
+            --output "downloads/video.%(ext)s" \
             --no-warnings \
-            "${{ env.CLEAN_URL }}" 2>&1 || {
+            --quiet \
+            "$URL" && echo "✅ SUCCESS" || {
+              echo "⚠️ Method 1 failed, trying method 2..."
               
-              echo ""
-              echo "❌ روش اول شکست خورد. روش جایگزین..."
-              
+              # Fallback: try different client
               yt-dlp \
-                --user-agent "Mozilla/5.0" \
+                --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
+                --extractor-args "youtube:player_client=tv,web_embedded" \
                 --no-playlist \
-                --format "best" \
-                --output "downloads/%(title).100s.%(ext)s" \
-                --restrict-filenames \
-                "${{ env.CLEAN_URL }}" 2>&1 || {
-                  echo "❌ دانلود موفق نبود."
+                --format "best[height<=720]" \
+                --output "downloads/video.%(ext)s" \
+                --no-warnings \
+                "$URL" && echo "✅ SUCCESS (Fallback)" || {
+                  echo "❌ All methods failed"
+                  ls -la downloads/ 2>/dev/null || true
                   exit 1
                 }
             }
           
           echo ""
-          echo "✅ دانلود تموم شد!"
-          ls -lh downloads/
+          echo "📋 Downloaded files:"
+          ls -lh downloads/ || echo "No files found"
 
-      - name: 📦 پردازش فایل
+      - name: 📦 Process & Split
         run: |
-          MODE="${{ github.event.inputs.mode }}"
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          SPLIT_MB="${{ github.event.inputs.split_mb }}"
           
-          # پیدا کردن فایل دانلود شده
-          DOWNLOADED_FILE=$(ls -t downloads/* 2>/dev/null | head -n1)
-          
-          if [ -z "$DOWNLOADED_FILE" ] || [ ! -f "$DOWNLOADED_FILE" ]; then
-            echo "❌ هیچ فایلی پیدا نشد!"
-            ls -la downloads/ 2>/dev/null
-            exit 1
-          fi
-          
-          BASENAME=$(basename "$DOWNLOADED_FILE")
-          SIZE=$(stat -c%s "$DOWNLOADED_FILE")
-          
-          echo "📦 فایل: $BASENAME"
-          echo "📏 حجم: $(( SIZE / 1024 / 1024 ))MB"
-          
-          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
-          
-          if [ "$MODE" = "zip" ]; then
-            echo "📦 حالت zip فعاله..."
-            zip -j "downloads/${BASENAME}_$(date +%Y%m%d_%H%M%S).zip" "$DOWNLOADED_FILE"
-            rm "$DOWNLOADED_FILE"
-            echo "✅ آرشیو ساخته شد."
+          # Check all files
+          for FILE in downloads/*; do
+            [ -f "$FILE" ] || continue
             
-          elif [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-            echo "✂️ تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB..."
-            zip -0 -s "${SPLIT_THRESHOLD_MB}m" "${DOWNLOADED_FILE}.zip" -j "$DOWNLOADED_FILE"
-            rm "$DOWNLOADED_FILE"
-            echo "✅ قطعات:"
-            ls -lh downloads/*.z* 2>/dev/null
-          fi
-          
-          echo ""
-          echo "📋 فایل‌های نهایی:"
-          ls -lh downloads/
-
-      - name: 📤 ذخیره در گیت‌هاب
-        run: |
-          echo "📤 در حال ذخیره‌سازی..."
-          
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git checkout "${{ github.ref_name }}" || git checkout -b "${{ github.ref_name }}"
-          
-          mapfile -t FILES < <(find downloads/ -type f -newer .git/index 2>/dev/null || find downloads/ -type f 2>/dev/null)
-          
-          TOTAL=${#FILES[@]}
-          echo "📦 تعداد فایل‌ها: $TOTAL"
-          
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "ℹ️ فایلی برای ذخیره نیست."
-            exit 0
-          fi
-          
-          BATCH_SIZE=5
-          COUNT=0
-          BATCH_NUM=1
-          
-          for FILE in "${FILES[@]}"; do
-            git add "$FILE"
-            COUNT=$((COUNT + 1))
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            NAME=$(basename "$FILE")
             
-            if [ $((COUNT % BATCH_SIZE)) -eq 0 ] || [ "$COUNT" -eq "$TOTAL" ]; then
-              echo "📤 ارسال گروه $BATCH_NUM ($COUNT/$TOTAL)"
-              git commit -m "🎬 [YouTube] $(date +'%Y-%m-%d %H:%M') [skip ci]" || true
-              git pull --rebase --strategy-option ours origin "${{ github.ref_name }}" 2>/dev/null || true
-              git push origin "${{ github.ref_name }}"
-              BATCH_NUM=$((BATCH_NUM + 1))
-              sleep 2
+            echo "📁 $NAME - $(( SIZE / 1024 / 1024 ))MB"
+            
+            # If bigger than split_mb, split it
+            if [ $SPLIT_MB -gt 0 ] && [ $SIZE -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
+              echo "   ✂️ Splitting into ${SPLIT_MB}MB parts..."
+              zip -0 -s "${SPLIT_MB}m" "${FILE}.zip" -j "$FILE"
+              rm "$FILE"
+              echo "   ✅ Parts created:"
+              ls -lh "${FILE}.z"* 2>/dev/null || true
             fi
           done
           
           echo ""
-          echo "🎉 همه فایل‌ها ذخیره شدن!"
-          echo "🔗 https://github.com/${{ github.repository }}/tree/main/downloads"
+          echo "📋 Final files:"
+          ls -lh downloads/ 2>/dev/null || echo "No files"
+
+      - name: 📤 Commit to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          
+          # Pull latest changes first
+          git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
+          
+          # Check for new files
+          git add downloads/
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ No new files to commit"
+          else
+            echo "📤 Committing files..."
+            
+            # Commit in batches if too many files
+            TOTAL_FILES=$(git diff --staged --name-only | wc -l)
+            echo "Total files: $TOTAL_FILES"
+            
+            if [ $TOTAL_FILES -gt 10 ]; then
+              # Commit in batches
+              for file in $(git diff --staged --name-only); do
+                git add "$file"
+                git commit -m "📹 YouTube video part $(date +%s) [skip ci]" && git push || true
+                sleep 1
+              done
+            else
+              git commit -m "📹 YouTube video [skip ci]" && git push
+            fi
+            
+            echo "✅ Files committed!"
+          fi
+
+      - name: 🎉 Done
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════╗"
+          echo "║   ✅ Download Complete!          ║"
+          echo "║   📁 Check downloads/ folder     ║"
+          echo "╚══════════════════════════════════╝"
+          echo ""
+          echo "🔗 Repository: https://github.com/${{ github.repository }}/tree/main/downloads"
