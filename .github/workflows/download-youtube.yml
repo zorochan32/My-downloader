@@ -1,4 +1,4 @@
-name: 🎬 YouTube via Invidious Proxy
+name: 🎬 YouTube Download with Cookies
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       quality:
-        description: 'کیفیت (پیشنهاد: 720)'
+        description: 'کیفیت'
         required: false
         default: '720'
         type: choice
@@ -18,7 +18,7 @@ on:
           - '720'
           - '1080'
       split_mb:
-        description: 'تقسیم به قطعه‌های چند مگابایتی؟ (0 = تقسیم نشه)'
+        description: 'تقسیم به قطعه‌های چند MB؟ (0 = تقسیم نشه)'
         required: false
         default: 90
         type: number
@@ -34,230 +34,133 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 📦 Install Tools
+      - name: 📦 Setup
         run: |
-          echo "📦 Installing packages..."
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip ffmpeg python3-pip curl jq wget
+          sudo apt-get install -y -qq aria2 zip ffmpeg python3-pip
+          
+          # Install Deno (needed by newer yt-dlp)
+          curl -fsSL https://deno.land/install.sh | sh -s -- -y 2>/dev/null || true
+          export DENO_INSTALL="$HOME/.deno"
+          export PATH="$DENO_INSTALL/bin:$PATH"
+          echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           
           pip install --quiet --upgrade yt-dlp
-          echo "✅ yt-dlp: $(yt-dlp --version)"
+          
+          echo "✅ yt-dlp $(yt-dlp --version)"
 
-      - name: 🔄 Extract YouTube ID & Find Proxy
+      - name: 🍪 Setup Cookies
+        run: |
+          # Save cookies from secret
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+          
+          # Verify cookies file
+          if [ -s cookies.txt ]; then
+            echo "✅ Cookies loaded ($(wc -l < cookies.txt) lines)"
+            head -3 cookies.txt
+          else
+            echo "⚠️ No cookies found! Will try without..."
+          fi
+
+      - name: ⬇️ Download Video
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
-          
-          echo "🔗 Original URL: $URL"
-          
-          # Extract video ID from various YouTube URL formats
-          if echo "$URL" | grep -q "youtu.be/"; then
-            VIDEO_ID=$(echo "$URL" | sed 's|.*youtu.be/||;s|[?&/].*||')
-          else
-            VIDEO_ID=$(echo "$URL" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
-          fi
-          
-          echo "📹 Video ID: $VIDEO_ID"
-          
-          if [ -z "$VIDEO_ID" ]; then
-            echo "❌ Could not extract video ID"
-            exit 1
-          fi
-          
-          echo "VIDEO_ID=$VIDEO_ID" >> $GITHUB_ENV
-          
-          # List of working Invidious instances (updated)
-          PROXY_LIST=(
-            "https://vid.puffyan.us"
-            "https://invidious.slipfox.xyz"
-            "https://yewtu.be"
-            "https://invidious.snopyta.org"
-            "https://invidious.namazso.eu"
-            "https://inv.nadeko.net"
-            "https://invidious.sethforprivacy.com"
-            "https://vid.privatevoid.net"
-            "https://invidious.lidarshield.cloud"
-          )
-          
-          # Find working proxy
-          echo "🔍 Finding working Invidious proxy..."
-          for PROXY in "${PROXY_LIST[@]}"; do
-            echo -n "  Testing $PROXY ... "
-            if curl -s --max-time 10 "$PROXY/api/v1/videos/$VIDEO_ID" > /tmp/video_info.json 2>/dev/null; then
-              TITLE=$(jq -r '.title // empty' /tmp/video_info.json 2>/dev/null)
-              if [ ! -z "$TITLE" ]; then
-                echo "✅"
-                echo "WORKING_PROXY=$PROXY" >> $GITHUB_ENV
-                echo "VIDEO_TITLE=$TITLE" >> $GITHUB_ENV
-                echo "📹 Title: $TITLE"
-                break
-              else
-                echo "❌ (no data)"
-              fi
-            else
-              echo "❌ (unreachable)"
-            fi
-          done
-          
-          if [ -z "$WORKING_PROXY" ]; then
-            echo "❌ No working proxy found. Trying direct yt-dlp..."
-            echo "FALLBACK=true" >> $GITHUB_ENV
-          else
-            echo "FALLBACK=false" >> $GITHUB_ENV
-          fi
-
-      - name: ⬇️ Download via Proxy or Direct
-        run: |
-          VIDEO_ID="${{ env.VIDEO_ID }}"
           QUALITY="${{ github.event.inputs.quality }}"
-          WORKING_PROXY="${{ env.WORKING_PROXY }}"
-          FALLBACK="${{ env.FALLBACK }}"
+          
+          echo "🎬 Starting download..."
+          echo "🔗 URL: $URL"
+          echo ""
           
           mkdir -p downloads
           
-          if [ "$FALLBACK" = "false" ] && [ ! -z "$WORKING_PROXY" ]; then
-            echo "🌐 Using Invidious Proxy: $WORKING_PROXY"
-            echo ""
-            
-            # Method 1: Download via Invidious API
-            echo "📥 Method 1: Invidious API direct download..."
-            
-            # Get direct video URL from Invidious
-            INVIDIOUS_VIDEO_URL="${WORKING_PROXY}/latest_version?id=${VIDEO_ID}&itag=22"
-            
-            # Try downloading with different formats
-            for ITAG in 22 18 37 136 247 135; do
-              echo -n "  Trying format $ITAG ... "
-              INVIDIOUS_URL="${WORKING_PROXY}/latest_version?id=${VIDEO_ID}&itag=${ITAG}"
-              
-              if curl -L -s --max-time 300 "$INVIDIOUS_URL" -o "downloads/video.mp4" 2>/dev/null; then
-                SIZE=$(stat -c%s downloads/video.mp4 2>/dev/null || echo 0)
-                if [ $SIZE -gt 1000000 ]; then
-                  echo "✅ Downloaded $(( SIZE / 1024 / 1024 ))MB"
-                  echo "DOWNLOAD_SUCCESS=true" >> $GITHUB_ENV
-                  break
-                else
-                  echo "❌ Too small ($SIZE bytes)"
-                  rm -f downloads/video.mp4
-                fi
-              else
-                echo "❌ Failed"
-              fi
-            done
-            
-          fi
-          
-          # If proxy failed, try yt-dlp directly
-          if [ ! -f downloads/video.mp4 ] || [ $(stat -c%s downloads/video.mp4 2>/dev/null || echo 0) -lt 1000000 ]; then
-            echo ""
-            echo "🔄 Falling back to yt-dlp direct download..."
-            
-            # Construct full YouTube URL
-            YT_FULL_URL="https://www.youtube.com/watch?v=$VIDEO_ID"
+          # Try with cookies
+          if [ -f cookies.txt ]; then
+            echo "📥 Attempt 1: With cookies..."
             
             yt-dlp \
-              --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
-              --format "best[height<=${QUALITY}]/best" \
+              --cookies cookies.txt \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              --extractor-args "youtube:player_client=android,web" \
               --no-playlist \
-              --output "downloads/video.%(ext)s" \
+              --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}]/best" \
               --merge-output-format mp4 \
+              --output "downloads/video.mp4" \
               --no-warnings \
-              "$YT_FULL_URL" 2>&1 || {
-                echo "❌ yt-dlp also failed"
+              "$URL" 2>&1 | tail -10
+              
+            if [ -f downloads/video.mp4 ] && [ $(stat -c%s downloads/video.mp4) -gt 1000000 ]; then
+              echo "✅ SUCCESS with cookies!"
+              echo "DOWNLOADED=true" >> $GITHUB_ENV
+            fi
+          fi
+          
+          # Fallback: Try without cookies but with different methods
+          if [ "${DOWNLOADED}" != "true" ]; then
+            echo "📥 Attempt 2: Direct download..."
+            
+            yt-dlp \
+              --user-agent "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip" \
+              --extractor-args "youtube:player_client=android,ios" \
+              --no-playlist \
+              --format "best[height<=720]" \
+              --output "downloads/video.%(ext)s" \
+              --no-warnings \
+              "$URL" 2>&1 | tail -10 || {
                 
-                # Last resort: try youtube.com directly with curl
-                echo "🔄 Last resort: direct curl..."
+                echo "📥 Attempt 3: Last resort..."
                 yt-dlp \
-                  --get-url \
-                  --format "best[height<=${QUALITY}]" \
+                  --format "best[height<=480]" \
                   --no-playlist \
-                  "$YT_FULL_URL" 2>/dev/null | while read -r DL_URL; do
-                    if [ ! -z "$DL_URL" ]; then
-                      echo "  Downloading from: ${DL_URL:0:80}..."
-                      aria2c -x16 -s16 -d downloads -o "video.mp4" "$DL_URL" && break
-                    fi
-                  done
+                  --output "downloads/video.%(ext)s" \
+                  "$URL" 2>&1 | tail -10
               }
           fi
           
-          # Check result
           echo ""
-          echo "📋 Downloaded files:"
-          ls -lh downloads/ 2>/dev/null || echo "  No files found"
-          
-          if [ -z "$(ls -A downloads/ 2>/dev/null)" ]; then
-            echo "❌ Download completely failed"
-            exit 1
-          fi
-          
-          echo "DOWNLOAD_SUCCESS=true" >> $GITHUB_ENV
+          echo "📋 Results:"
+          ls -lh downloads/ 2>/dev/null || echo "No files"
 
-      - name: 📦 Process & Split Files
+      - name: 📦 Split if needed
+        if: success()
         run: |
           SPLIT_MB="${{ github.event.inputs.split_mb }}"
           
-          echo "📦 Processing files..."
           cd downloads
           
           for FILE in *; do
             [ -f "$FILE" ] || continue
+            SIZE=$(stat -c%s "$FILE")
+            echo "📁 $FILE ($(( SIZE / 1024 / 1024 ))MB)"
             
-            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-            SIZE_MB=$(( SIZE / 1024 / 1024 ))
-            
-            echo "📁 $FILE ($SIZE_MB MB)"
-            
-            if [ "$SPLIT_MB" != "0" ] && [ "$SIZE" -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
+            if [ "$SPLIT_MB" != "0" ] && [ $SIZE -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
               echo "   ✂️ Splitting into ${SPLIT_MB}MB parts..."
               zip -0 -s "${SPLIT_MB}m" "${FILE}.zip" "$FILE"
               rm "$FILE"
-              PART_COUNT=$(ls "${FILE}".zip.z* 2>/dev/null | wc -l)
-              echo "   ✅ Created $PART_COUNT parts"
             fi
           done
           
-          echo ""
-          echo "📋 Final files:"
           ls -lh
 
-      - name: 📤 Commit to Repository
+      - name: 📤 Upload
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           
-          # Pull latest
           git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
-          
-          # Add new files
           git add downloads/
           
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "No new files"
             exit 0
           fi
           
-          # Count files
-          FILE_COUNT=$(git diff --staged --name-only | grep downloads/ | wc -l)
+          TOTAL=$(git diff --staged --name-only | wc -l)
+          echo "📤 Uploading $TOTAL files..."
           
-          # Commit in batches
-          BATCH_SIZE=5
-          COMMITTED=0
-          
-          for ((i=0; i<$FILE_COUNT; i+=BATCH_SIZE)); do
-            FILES_TO_COMMIT=$(git diff --staged --name-only | grep downloads/ | head -$((i+BATCH_SIZE)) | tail -$BATCH_SIZE)
-            
-            if [ ! -z "$FILES_TO_COMMIT" ]; then
-              echo "$FILES_TO_COMMIT" | while read -r f; do
-                git add "$f"
-              done
-              
-              git commit -m "📹 [YouTube] Download batch $((i/BATCH_SIZE + 1)) [skip ci]" 2>/dev/null || true
-              git push origin ${{ github.ref_name }}
-              COMMITTED=$((COMMITTED + BATCH_SIZE))
-              sleep 2
-            fi
+          for ((i=1; i<=TOTAL; i+=5)); do
+            git commit -m "📹 YouTube download [skip ci]" 2>/dev/null || true
+            git push origin ${{ github.ref_name }}
+            sleep 2
           done
           
-          echo ""
-          echo "╔══════════════════════════════════╗"
-          echo "║   ✅ Upload Complete!           ║"
-          echo "╚══════════════════════════════════╝"
+          echo "✅ Complete!"
