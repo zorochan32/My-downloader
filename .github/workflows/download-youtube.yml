@@ -1,0 +1,76 @@
+name: دانلود از یوتیوب و ذخیره در ریپو
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'لینک ویدیوی یوتیوب'
+        required: true
+
+jobs:
+  download-and-save:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and install yt-dlp
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install yt-dlp
+
+      - name: دریافت لینک مستقیم دانلود
+        id: get_url
+        run: |
+          # بهترین کیفیت ویدیو+صدا رو پیدا می‌کنه و لینک مستقیمش رو می‌ده
+          DIRECT_URL=$(yt-dlp -f "best" -g "${{ github.event.inputs.youtube_url }}" 2>/dev/null)
+          if [ -z "$DIRECT_URL" ]; then
+            echo "❌ خطا: نتونستم لینک مستقیم ویدیو رو پیدا کنم. لینک یوتیوب رو چک کن."
+            exit 1
+          fi
+          echo "✅ لینک مستقیم پیدا شد."
+          echo "direct_url=${DIRECT_URL}" >> $GITHUB_OUTPUT
+
+      - name: نمایش و ذخیره لینک مستقیم (برای دیباگ)
+        run: |
+          echo "لینک مستقیم استخراج شده:"
+          echo "${{ steps.get_url.outputs.direct_url }}"
+          # این لینک رو به فایل url.txt اضافه می‌کنیم تا workflow دانلودر اصلی ازش استفاده کنه
+          echo "${{ steps.get_url.outputs.direct_url }}" > url.txt
+
+      # از اینجا به بعد، از Workflow اصلی خودت برای دانلود استفاده می‌کنیم
+      - name: دانلود فایل با Aria2 و ذخیره در ریپو
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 120
+          max_attempts: 3
+          command: |
+            # ساخت پوشه downloads اگر وجود نداشته باشد
+            mkdir -p downloads
+            cd downloads
+            # خواندن لینک از فایل url.txt
+            URL=$(cat ../url.txt)
+            # دانلود با aria2c
+            aria2c -x 16 -s 16 --summary-interval=0 "$URL"
+
+      - name: فشرده‌سازی و پارتیشن‌بندی فایل(ها)
+        run: |
+          cd downloads
+          # پیدا کردن آخرین فایل دانلود شده (فیلتر کردن فایل‌های غیر zip)
+          LAST_FILE=$(ls -t | head -n1)
+          if [ -z "$LAST_FILE" ]; then
+            echo "❌ هیچ فایلی پیدا نشد."
+            exit 1
+          fi
+          echo "📦 فایل اصلی: $LAST_FILE"
+          # فشرده‌سازی با 7z و تقسیم به پارت‌های ۹۰ مگابایتی
+          7z a -v90m "${LAST_FILE}.zip" "$LAST_FILE"
+          rm "$LAST_FILE" # پاک کردن فایل اصلی برای صرفه‌جویی در فضای مخزن
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          git commit -m "✅ دانلود و ذخیره ویدیو از یوتیوب - $(date +'%Y-%m-%d %H:%M:%S')"
+          git push
