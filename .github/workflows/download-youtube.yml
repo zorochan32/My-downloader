@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'لینک ویدیوی یوتیوب (فقط ویدیوی تکی، نه پلی‌لیست)'
+        description: 'لینک ویدیوی یوتیوب (فقط ویدیوی تکی)'
         required: true
         type: string
       mode:
@@ -16,7 +16,7 @@ on:
           - normal
           - zip
       split_threshold_mb:
-        description: 'تقسیم فایل‌های بزرگتر از این مقدار (MB) - 0 یعنی تقسیم نشه'
+        description: 'تقسیم فایل‌های بزرگتر از این مقدار (MB)'
         required: false
         default: 90
         type: number
@@ -32,154 +32,175 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: نصب ابزارهای مورد نیاز
+      - name: 📦 نصب پیش‌نیازها
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 zip ffmpeg
-          python3 -m pip install --upgrade pip
-          pip install --upgrade yt-dlp
-          echo "✅ yt-dlp version: $(yt-dlp --version)"
-          echo "✅ ffmpeg version: $(ffmpeg -version | head -n1)"
+          echo "📦 در حال نصب بسته‌های مورد نیاز..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 zip ffmpeg python3-pip wget curl
+          
+          echo "🐍 نصب yt-dlp..."
+          pip install --upgrade --quiet yt-dlp
+          
+          echo "✅ نسخه‌ها:"
+          yt-dlp --version
+          ffmpeg -version 2>&1 | head -n1
 
-      - name: 🎯 استخراج و دانلود از یوتیوب
+      - name: 🧹 آماده‌سازی
         run: |
-          YT_URL="${{ github.event.inputs.youtube_url }}"
-          MODE="${{ github.event.inputs.mode }}"
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          
-          echo "🏷️  AVASAM - YouTube Download Solution"
+          echo "🏷️  AVASAM - YouTube Downloader"
           echo "🌐 https://avasam.ir"
-          echo "🔗 لینک: $YT_URL"
-          echo ""
-          
-          # حذف پارامترهای اضافی مثل list= از لینک
-          CLEAN_URL=$(echo "$YT_URL" | sed 's/&list=.*//' | sed 's/?list=.*//')
-          echo "🔗 لینک تمیز شده: $CLEAN_URL"
           echo ""
           
           mkdir -p downloads
           
-          # روش جدید: مستقیماً با yt-dlp دانلود کن، بعد با همون سیستم قبلی پردازش کن
-          echo "📥 در حال دانلود با yt-dlp..."
+          YT_URL="${{ github.event.inputs.youtube_url }}"
+          echo "🔗 لینک اصلی: $YT_URL"
           
-          # اول عنوان ویدیو رو می‌گیریم
-          VIDEO_TITLE=$(yt-dlp --get-title --no-playlist "$CLEAN_URL" 2>&1)
-          if [ $? -ne 0 ]; then
-            echo "❌ خطا در دریافت عنوان:"
-            echo "$VIDEO_TITLE"
+          # تمیز کردن لینک
+          CLEAN_URL=$(echo "$YT_URL" | sed -E 's/[&?]list=[^&]*//g' | sed -E 's/[&?]si=[^&]*//g' | sed -E 's/[&?]t=[^&]*//g')
+          echo "🔗 لینک تمیز: $CLEAN_URL"
+          echo "CLEAN_URL=$CLEAN_URL" >> $GITHUB_ENV
+
+      - name: 🔍 تست دسترسی به یوتیوب
+        id: check
+        run: |
+          echo "🔍 تست اتصال به یوتیوب..."
+          
+          # تست با yt-dlp --simulate
+          yt-dlp --simulate --no-playlist --print "%(title)s" "${{ env.CLEAN_URL }}" 2>&1 || {
             echo ""
-            echo "🔸 نکته: مطمئن شو لینک ویدیوی تکی باشه، نه پلی‌لیست"
+            echo "⚠️ تست اول ناموفق بود. تست دوم با user-agent سفارشی..."
+            
+            yt-dlp \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              --simulate \
+              --no-playlist \
+              --print "%(title)s" \
+              "${{ env.CLEAN_URL }}" 2>&1 || {
+              
+              echo ""
+              echo "❌ نتونستم به یوتیوب وصل بشم."
+              echo "🔸 پیشنهاد: یه بار دیگه امتحان کن یا لینک رو چک کن."
+              exit 1
+            }
+          }
+          
+          echo "✅ اتصال به یوتیوب برقراره!"
+
+      - name: ⬇️ دانلود ویدیو
+        run: |
+          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          MODE="${{ github.event.inputs.mode }}"
+          
+          echo "📥 شروع دانلود..."
+          
+          # دانلود با yt-dlp
+          yt-dlp \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --no-playlist \
+            --format "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+            --merge-output-format mp4 \
+            --output "downloads/%(title).100s.%(ext)s" \
+            --restrict-filenames \
+            --no-warnings \
+            "${{ env.CLEAN_URL }}" 2>&1 || {
+              
+              echo ""
+              echo "❌ روش اول شکست خورد. روش جایگزین..."
+              
+              yt-dlp \
+                --user-agent "Mozilla/5.0" \
+                --no-playlist \
+                --format "best" \
+                --output "downloads/%(title).100s.%(ext)s" \
+                --restrict-filenames \
+                "${{ env.CLEAN_URL }}" 2>&1 || {
+                  echo "❌ دانلود موفق نبود."
+                  exit 1
+                }
+            }
+          
+          echo ""
+          echo "✅ دانلود تموم شد!"
+          ls -lh downloads/
+
+      - name: 📦 پردازش فایل
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          
+          # پیدا کردن فایل دانلود شده
+          DOWNLOADED_FILE=$(ls -t downloads/* 2>/dev/null | head -n1)
+          
+          if [ -z "$DOWNLOADED_FILE" ] || [ ! -f "$DOWNLOADED_FILE" ]; then
+            echo "❌ هیچ فایلی پیدا نشد!"
+            ls -la downloads/ 2>/dev/null
             exit 1
           fi
           
-          echo "📹 عنوان: $VIDEO_TITLE"
+          BASENAME=$(basename "$DOWNLOADED_FILE")
+          SIZE=$(stat -c%s "$DOWNLOADED_FILE")
           
-          # تمیز کردن اسم فایل
-          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9آ-ی۰-۹_ -]//g' | sed 's/ /_/g' | cut -c1-100)
+          echo "📦 فایل: $BASENAME"
+          echo "📏 حجم: $(( SIZE / 1024 / 1024 ))MB"
           
-          # دانلود مستقیم با yt-dlp (با فرمت mp4)
-          echo "⬇️ در حال دانلود..."
-          yt-dlp \
-            -f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
-            --no-playlist \
-            --merge-output-format mp4 \
-            -o "downloads/${SAFE_TITLE}.mp4" \
-            "$CLEAN_URL" 2>&1 | tail -20
-          
-          DOWNLOAD_EXIT=$?
-          
-          if [ $DOWNLOAD_EXIT -ne 0 ]; then
-            echo ""
-            echo "❌ خطا در دانلود. کد خروج: $DOWNLOAD_EXIT"
-            echo "🔸 در حال تلاش با روش جایگزین..."
-            
-            # روش جایگزین: دانلود هر فرمتی که باشه
-            yt-dlp \
-              -f "best" \
-              --no-playlist \
-              -o "downloads/${SAFE_TITLE}.%(ext)s" \
-              "$CLEAN_URL" 2>&1 | tail -20
-            
-            if [ $? -ne 0 ]; then
-              echo "❌ روش جایگزین هم جواب نداد."
-              exit 1
-            fi
-          fi
-          
-          echo "✅ دانلود تموم شد."
-          
-          # پیدا کردن فایل دانلود شده
-          DOWNLOADED_FILE=$(ls -t downloads/ | head -n1)
-          FILE_PATH="downloads/$DOWNLOADED_FILE"
-          FILE_SIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
-          
-          echo "📦 فایل: $DOWNLOADED_FILE"
-          echo "📏 حجم: $(( FILE_SIZE / 1024 / 1024 ))MB"
-          
-          # اگه حالت zip باشه یا حجم فایل از حد مجاز بیشتر باشه، تقسیمش می‌کنیم
           SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
           
           if [ "$MODE" = "zip" ]; then
-            echo "📦 ایجاد آرشیو zip..."
-            ARCHIVE_NAME="downloads/${SAFE_TITLE}_$(date +%Y%m%d_%H%M%S).zip"
-            zip -j "$ARCHIVE_NAME" "$FILE_PATH"
-            rm "$FILE_PATH"
-            echo "✅ آرشیو ساخته شد: $ARCHIVE_NAME"
+            echo "📦 حالت zip فعاله..."
+            zip -j "downloads/${BASENAME}_$(date +%Y%m%d_%H%M%S).zip" "$DOWNLOADED_FILE"
+            rm "$DOWNLOADED_FILE"
+            echo "✅ آرشیو ساخته شد."
             
-          elif [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-            echo "✂️ حجم فایل از ${SPLIT_THRESHOLD_MB}MB بیشتره — تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB"
-            zip -0 -s "${SPLIT_THRESHOLD_MB}m" "${FILE_PATH}.zip" -j "$FILE_PATH"
-            rm "$FILE_PATH"
-            echo "✅ تعداد قطعه‌ها: $(ls downloads/${DOWNLOADED_FILE}.z* 2>/dev/null | wc -l)"
+          elif [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+            echo "✂️ تقسیم به قطعه‌های ${SPLIT_THRESHOLD_MB}MB..."
+            zip -0 -s "${SPLIT_THRESHOLD_MB}m" "${DOWNLOADED_FILE}.zip" -j "$DOWNLOADED_FILE"
+            rm "$DOWNLOADED_FILE"
+            echo "✅ قطعات:"
+            ls -lh downloads/*.z* 2>/dev/null
           fi
           
           echo ""
-          echo "📋 فایل‌های موجود در پوشه downloads:"
+          echo "📋 فایل‌های نهایی:"
           ls -lh downloads/
 
-      - name: 📤 ذخیره‌سازی در گیت‌هاب
+      - name: 📤 ذخیره در گیت‌هاب
         run: |
-          BRANCH="${GITHUB_REF_NAME}"
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          echo "📤 در حال ذخیره‌سازی..."
           
-          echo "📤 در حال ذخیره‌سازی فایل‌ها..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # لیست فایل‌های جدید و تغییر یافته
-          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
+          git checkout "${{ github.ref_name }}" || git checkout -b "${{ github.ref_name }}"
           
-          TOTAL=${#ALL_FILES[@]}
-          echo "📦 تعداد فایل‌های جدید: $TOTAL"
+          mapfile -t FILES < <(find downloads/ -type f -newer .git/index 2>/dev/null || find downloads/ -type f 2>/dev/null)
+          
+          TOTAL=${#FILES[@]}
+          echo "📦 تعداد فایل‌ها: $TOTAL"
           
           if [ "$TOTAL" -eq 0 ]; then
-            echo "ℹ️ فایل جدیدی وجود نداره."
+            echo "ℹ️ فایلی برای ذخیره نیست."
             exit 0
           fi
           
-          # نمایش فایل‌ها
-          for f in "${ALL_FILES[@]}"; do
-            echo "  - $f"
-          done
-          
-          # ارسال گروهی (هر 5 تا)
           BATCH_SIZE=5
-          BATCH_NUM=0
+          COUNT=0
+          BATCH_NUM=1
           
-          for (( i=0; i<TOTAL; i+=BATCH_SIZE )); do
-            BATCH_NUM=$(( BATCH_NUM + 1 ))
-            BATCH=("${ALL_FILES[@]:i:BATCH_SIZE}")
+          for FILE in "${FILES[@]}"; do
+            git add "$FILE"
+            COUNT=$((COUNT + 1))
             
-            echo "🚀 گروه $BATCH_NUM: ارسال $((i+1)) تا $(( i + ${#BATCH[@]} )) از $TOTAL"
-            
-            git add "${BATCH[@]}"
-            git commit -m "🎬 [YouTube] ${VIDEO_TITLE:-video} — $(date +'%Y-%m-%d %H:%M')"
-            
-            git pull --rebase origin "$BRANCH" 2>/dev/null || true
-            git push origin HEAD:"$BRANCH"
-            
-            echo "✅ گروه $BATCH_NUM ذخیره شد"
+            if [ $((COUNT % BATCH_SIZE)) -eq 0 ] || [ "$COUNT" -eq "$TOTAL" ]; then
+              echo "📤 ارسال گروه $BATCH_NUM ($COUNT/$TOTAL)"
+              git commit -m "🎬 [YouTube] $(date +'%Y-%m-%d %H:%M') [skip ci]" || true
+              git pull --rebase --strategy-option ours origin "${{ github.ref_name }}" 2>/dev/null || true
+              git push origin "${{ github.ref_name }}"
+              BATCH_NUM=$((BATCH_NUM + 1))
+              sleep 2
+            fi
           done
           
           echo ""
-          echo "🎉 همه فایل‌ها با موفقیت ذخیره شدن!"
+          echo "🎉 همه فایل‌ها ذخیره شدن!"
           echo "🔗 https://github.com/${{ github.repository }}/tree/main/downloads"
