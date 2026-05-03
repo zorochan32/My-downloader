@@ -1,10 +1,10 @@
-name: 🧠 Smart Downloader v2
+name: 🧠 Ultimate Smart Downloader
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک دانلود (Pixeldrain, Gofile, یا مستقیم)'
+        description: 'لینک دانلود (Pixeldrain, Gofile, Mega, یا مستقیم)'
         required: true
         type: string
       split_mb:
@@ -27,113 +27,182 @@ jobs:
       - name: 📦 Setup
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip curl jq wget
+          sudo apt-get install -y -qq aria2 zip curl jq wget p7zip-full python3-pip
+          pip install --quiet megatools 2>/dev/null || {
+            # Manual install megatools if pip fails
+            wget -q https://megatools.megous.com/builds/megatools-1.11.1.1-Linux-x86_64.tar.gz
+            tar xzf megatools-1.11.1.1-Linux-x86_64.tar.gz
+            sudo cp megatools-1.11.1.1-Linux-x86_64/megatools /usr/local/bin/
+            sudo cp megatools-1.11.1.1-Linux-x86_64/megadl /usr/local/bin/
+          }
           mkdir -p downloads
 
-      - name: 🔍 Extract Download Info
+      - name: 🔍 Smart URL Parser
         run: |
           URL="${{ github.event.inputs.url }}"
           
-          echo "🔗 URL: $URL"
+          echo "╔══════════════════════════════════╗"
+          echo "║   🧠 Smart URL Parser           ║"
+          echo "╚══════════════════════════════════╝"
+          echo "🔗 Input: $URL"
+          echo ""
           
-          # Extract File ID from any Pixeldrain URL format
+          # Detect service and extract download URL
           if echo "$URL" | grep -qi "pixeldrain"; then
-            FILE_ID=$(echo "$URL" | grep -oP '(?:/u/|/api/file/)\K[a-zA-Z0-9]+' | head -1)
+            echo "📦 Service: Pixeldrain"
             
-            if [ -z "$FILE_ID" ]; then
-              echo "❌ Could not extract file ID"
-              exit 1
-            fi
+            # Extract file ID
+            FILE_ID=$(echo "$URL" | grep -oP '(?:pixeldrain\.com/(?:u/|api/file/))\K[a-zA-Z0-9]+')
+            echo "🆔 File ID: $FILE_ID"
             
-            echo "📋 Pixeldrain File ID: $FILE_ID"
+            # Get info from API
+            INFO=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info")
+            FILE_NAME=$(echo "$INFO" | jq -r '.name // "file_'"$FILE_ID"'"')
             
-            # Get file info from API
-            echo "🔍 Getting file info..."
-            FILE_INFO=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info")
-            
-            # Extract name and size
-            FILE_NAME=$(echo "$FILE_INFO" | jq -r '.name // empty')
-            if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "null" ]; then
-              FILE_NAME="file_${FILE_ID}"
-            fi
-            
-            # Clean filename for Windows compatibility
-            FILE_NAME=$(echo "$FILE_NAME" | sed 's/[<>:"/\\|?*]/-/g')
-            
-            echo "📁 Name: $FILE_NAME"
-            
-            # Direct download URL
-            DOWNLOAD_URL="https://pixeldrain.com/api/file/$FILE_ID?download"
+            # Pixeldrain direct download uses /api/file/ID without ?download
+            DOWNLOAD_URL="https://pixeldrain.com/api/file/$FILE_ID"
             
           elif echo "$URL" | grep -qi "gofile"; then
-            # Gofile handling
-            FILE_ID=$(echo "$URL" | grep -oP '(?:/d/)\K[a-zA-Z0-9]+')
-            API_INFO=$(curl -s "https://api.gofile.io/getContent?contentId=$FILE_ID")
-            DOWNLOAD_URL=$(echo "$API_INFO" | jq -r '.data.contents[].link // empty' | head -1)
-            FILE_NAME=$(echo "$API_INFO" | jq -r '.data.contents[].name // "download"' | head -1)
+            echo "📦 Service: Gofile"
+            
+            FILE_ID=$(echo "$URL" | grep -oP 'gofile\.io/d/\K[a-zA-Z0-9]+')
+            echo "🆔 Content ID: $FILE_ID"
+            
+            API_RESPONSE=$(curl -s "https://api.gofile.io/getContent?contentId=$FILE_ID")
+            DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.contents[].link' | head -1)
+            FILE_NAME=$(echo "$API_RESPONSE" | jq -r '.data.contents[].name' | head -1)
+            
+          elif echo "$URL" | grep -qi "mega"; then
+            echo "📦 Service: Mega.nz"
+            
+            # For mega, we'll use the URL directly with megadl
+            DOWNLOAD_URL="$URL"
+            FILE_NAME="mega_download"
+            echo "MEGA=true" >> $GITHUB_ENV
             
           else
-            # Direct link
+            echo "📦 Service: Direct Link"
             DOWNLOAD_URL="$URL"
-            FILE_NAME=$(basename "$URL" | cut -d'?' -f1)
+            FILE_NAME=$(basename "$URL" | cut -d'?' -f1 | cut -d'#' -f1)
           fi
           
+          # Clean filename
+          FILE_NAME=$(echo "$FILE_NAME" | sed 's/[<>:"/\\|?*~]/_/g' | sed 's/%20/_/g')
+          
+          echo "📁 Filename: $FILE_NAME"
           echo "🔗 Download URL: ${DOWNLOAD_URL:0:100}..."
+          
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
+          
+          # If download URL is empty, fail
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Could not determine download URL"
+            exit 1
+          fi
 
-      - name: ⬇️ Download with Aria2
+      - name: ⬇️ Pixeldrain Download
+        if: success() && env.MEGA != 'true' && contains(env.DOWNLOAD_URL, 'pixeldrain')
         run: |
           URL="${{ env.DOWNLOAD_URL }}"
           NAME="${{ env.FILE_NAME }}"
           
-          echo "⬇️ Downloading: $NAME"
-          echo ""
+          echo "⬇️ Downloading from Pixeldrain..."
+          echo "📁 Saving as: $NAME"
           
-          # Download with aria2c with proper headers
+          # Use curl with proper headers for Pixeldrain
+          curl -L \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+            -H "Accept: */*" \
+            -H "Accept-Encoding: identity" \
+            --retry 10 \
+            --retry-delay 10 \
+            --max-time 7200 \
+            -o "downloads/$NAME" \
+            "$URL" 2>&1 | tail -5
+          
+          # Check result
+          if [ -f "downloads/$NAME" ]; then
+            SIZE=$(stat -c%s "downloads/$NAME")
+            echo ""
+            echo "📦 Downloaded: $(( SIZE / 1024 / 1024 ))MB ($SIZE bytes)"
+            
+            if [ $SIZE -lt 50000 ]; then
+              echo "⚠️ File too small! Might be an error response."
+              echo "First 500 chars:"
+              head -c 500 "downloads/$NAME"
+              exit 1
+            fi
+          else
+            echo "❌ Download failed - no file created"
+            exit 1
+          fi
+
+      - name: ⬇️ Gofile Download
+        if: success() && env.MEGA != 'true' && contains(env.DOWNLOAD_URL, 'gofile')
+        run: |
+          URL="${{ env.DOWNLOAD_URL }}"
+          NAME="${{ env.FILE_NAME }}"
+          
+          echo "⬇️ Downloading from Gofile..."
+          
+          aria2c \
+            --split=8 \
+            --max-connection-per-server=8 \
+            --max-tries=5 \
+            --retry-wait=10 \
+            --dir="downloads" \
+            --out="$NAME" \
+            --allow-overwrite=true \
+            "$URL" 2>&1 | grep -E "(\[#|OK|ERR)"
+          
+          ls -lh "downloads/$NAME" 2>/dev/null || echo "❌ File not found"
+
+      - name: ⬇️ Mega Download
+        if: success() && env.MEGA == 'true'
+        run: |
+          URL="${{ env.DOWNLOAD_URL }}"
+          
+          echo "⬇️ Downloading from Mega.nz..."
+          echo "🔗 $URL"
+          
+          # Download with megadl
+          megadl --path=downloads "$URL" 2>&1
+          
+          # Find downloaded file
+          DOWNLOADED=$(ls -t downloads/* 2>/dev/null | head -1)
+          
+          if [ -f "$DOWNLOADED" ]; then
+            SIZE=$(stat -c%s "$DOWNLOADED")
+            echo "📦 Downloaded: $(( SIZE / 1024 / 1024 ))MB"
+            echo "FILE_NAME=$(basename "$DOWNLOADED")" >> $GITHUB_ENV
+          else
+            echo "❌ Mega download failed"
+            exit 1
+          fi
+
+      - name: ⬇️ Direct Download
+        if: success() && env.MEGA != 'true' && ! contains(env.DOWNLOAD_URL, 'pixeldrain') && ! contains(env.DOWNLOAD_URL, 'gofile')
+        run: |
+          URL="${{ env.DOWNLOAD_URL }}"
+          NAME="${{ env.FILE_NAME }}"
+          
+          echo "⬇️ Direct download..."
+          
           aria2c \
             --split=16 \
             --max-connection-per-server=16 \
             --min-split-size=1M \
-            --max-tries=10 \
-            --retry-wait=10 \
-            --timeout=60 \
-            --connect-timeout=30 \
-            --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --max-tries=5 \
+            --retry-wait=5 \
             --dir="downloads" \
             --out="$NAME" \
             --allow-overwrite=true \
-            --continue=true \
-            "$URL" 2>&1 | grep -E "(\[#|Download|download|OK|ERR)"
+            "$URL" 2>&1 | grep -E "(\[#|OK|ERR|Download)"
           
-          # Verify download
-          if [ -f "downloads/$NAME" ]; then
-            SIZE=$(stat -c%s "downloads/$NAME" 2>/dev/null || echo 0)
-            echo ""
-            echo "📦 Downloaded: $(( SIZE / 1024 / 1024 ))MB"
-            
-            # Check if it's an HTML/JSON error page (pixeldrain sometimes returns errors)
-            if [ $SIZE -lt 10000 ]; then
-              echo "⚠️ File too small, might be error page. Checking..."
-              head -c 500 "downloads/$NAME"
-              
-              # Try alternative URL format
-              if grep -q "error\|html\|json" "downloads/$NAME" 2>/dev/null; then
-                echo "🔄 Retrying with different URL format..."
-                rm "downloads/$NAME"
-                
-                FILE_ID=$(echo "$URL" | grep -oP '[a-zA-Z0-9]+(?=\?)')
-                NEW_URL="https://pixeldrain.com/api/file/${FILE_ID}?download"
-                
-                curl -L -H "User-Agent: Mozilla/5.0" -o "downloads/$NAME" "$NEW_URL"
-              fi
-            fi
-          else
-            echo "❌ Download failed"
-            exit 1
-          fi
+          ls -lh "downloads/$NAME" 2>/dev/null || echo "❌ Download failed"
 
-      - name: 📦 Split Files
+      - name: 📦 Split Large Files
         run: |
           SPLIT_MB="${{ github.event.inputs.split_mb }}"
           
@@ -142,73 +211,86 @@ jobs:
           
           cd downloads
           
-          # Only process new files (created in last 5 minutes)
-          for FILE in $(find . -maxdepth 1 -type f -newer /tmp -name "*" | sed 's|^./||'); do
-            [ -z "$FILE" ] && continue
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
             
-            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            SIZE=$(stat -c%s "$FILE")
             SIZE_MB=$(( SIZE / 1024 / 1024 ))
             
+            # Skip tiny files (errors)
             if [ $SIZE -lt 10000 ]; then
-              echo "⏭️  Skipping small file: $FILE ($SIZE bytes)"
+              echo "⏭️  Skipping tiny file: $FILE (${SIZE}B)"
               continue
             fi
             
-            echo "📁 $FILE ($SIZE_MB MB)"
+            echo "📁 $FILE (${SIZE_MB}MB)"
             
             if [ "$SPLIT_MB" != "0" ] && [ $SIZE -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
               echo "   ✂️ Splitting into ${SPLIT_MB}MB parts..."
+              
+              # Remove old parts if exist
+              rm -f "${FILE}.zip".z*
+              
+              # Create split zip
               zip -0 -s "${SPLIT_MB}m" "${FILE}.zip" "$FILE"
-              rm "$FILE"
-              echo "   ✅ Done"
+              
+              # Only remove original if split was successful
+              if ls "${FILE}.zip".z* 1>/dev/null 2>&1; then
+                rm "$FILE"
+                PARTS=$(ls "${FILE}.zip".z* 2>/dev/null | wc -l)
+                echo "   ✅ $PARTS parts created"
+              else
+                echo "   ⚠️ Split may have failed - keeping original"
+              fi
             fi
           done
           
           echo ""
-          echo "📋 Files in downloads/:"
-          ls -lhS
+          echo "📋 Download folder contents:"
+          ls -lhS | head -20
 
-      - name: 📤 Commit to Repository
+      - name: 📤 Upload to GitHub
         run: |
-          # Check if there are files to upload
+          cd "$GITHUB_WORKSPACE"
+          
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           
+          # Pull latest
           git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
           
           # Find new files
           NEW_FILES=$(git ls-files --others --exclude-standard downloads/ 2>/dev/null)
+          MODIFIED=$(git diff --name-only downloads/ 2>/dev/null)
+          ALL_FILES=$(echo -e "$NEW_FILES\n$MODIFIED" | sort -u | grep .)
           
-          if [ -z "$NEW_FILES" ]; then
-            echo "❌ No new files found!"
-            echo "Current downloads/:"
+          TOTAL=$(echo "$ALL_FILES" | wc -l)
+          
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "❌ No files to upload!"
             ls -la downloads/
             exit 1
           fi
           
-          # Count files
-          TOTAL=$(echo "$NEW_FILES" | wc -l)
-          echo "📤 Uploading $TOTAL file(s)..."
-          echo "$NEW_FILES"
-          echo ""
+          echo "📤 Uploading $TOTAL files..."
           
-          # Upload in batches
+          # Upload in batches of 5
           COUNTER=0
-          BATCH_NUM=1
-          
-          echo "$NEW_FILES" | while read -r FILE; do
-            [ -z "$FILE" ] && continue
+          BATCH=1
+          echo "$ALL_FILES" | while read -r f; do
+            [ -z "$f" ] && continue
             
-            git add "$FILE"
+            git add "$f"
             COUNTER=$((COUNTER + 1))
             
             if [ $((COUNTER % 5)) -eq 0 ] || [ $COUNTER -eq $TOTAL ]; then
-              echo "📤 Batch $BATCH_NUM ($COUNTER/$TOTAL)"
-              git commit -m "📥 [SmartDL] Part $BATCH_NUM [skip ci]" 2>/dev/null || true
+              echo "📤 Batch $BATCH ($COUNTER/$TOTAL)"
+              git commit -m "📥 [DL] Batch $BATCH [skip ci]" 2>/dev/null || true
               git push origin ${{ github.ref_name }} 2>/dev/null
+              [ $? -ne 0 ] && git pull --rebase && git push
+              BATCH=$((BATCH + 1))
               sleep 2
-              BATCH_NUM=$((BATCH_NUM + 1))
             fi
           done
           
-          echo "✅ Upload complete!"
+          echo "✅ Complete!"
