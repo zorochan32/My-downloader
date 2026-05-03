@@ -1,0 +1,127 @@
+name: 🗑️ Delete Files Smart
+
+on:
+  workflow_dispatch:
+    inputs:
+      filename:
+        description: 'اسم فایل یا پارت (مثلاً FEMBOY.FUTA.HOUSE.Build.19960185.zip.z01)'
+        required: true
+        type: string
+      delete_all_parts:
+        description: 'همه پارت‌های مرتبط رو پاک کنه؟'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 2
+
+      - name: 🔍 Find Related Files
+        run: |
+          FILENAME="${{ github.event.inputs.filename }}"
+          DELETE_ALL="${{ github.event.inputs.delete_all_parts }}"
+          
+          echo "🗑️  AVASAM Smart File Deleter"
+          echo "🔍 Looking for: $FILENAME"
+          echo ""
+          
+          # Extract base name pattern
+          # Examples:
+          # FEMBOY.FUTA.HOUSE.Build.19960185.zip.z01 -> FEMBOY.FUTA.HOUSE.Build.19960185
+          # video.mp4 -> video
+          
+          # Remove extensions and part numbers
+          BASE_NAME=$(echo "$FILENAME" | sed -E 's/\.(z[0-9]+|zip|part[0-9]+|rar|r[0-9]+)$//i' | sed -E 's/\.[^.]+$//')
+          
+          # Also try removing .zip from end
+          BASE_NAME2=$(echo "$FILENAME" | sed 's/\.zip\.z[0-9]\+$//' | sed 's/\.zip$//')
+          
+          echo "📝 Base pattern 1: $BASE_NAME*"
+          echo "📝 Base pattern 2: $BASE_NAME2*"
+          echo ""
+          
+          # Store patterns
+          echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
+          echo "BASE_NAME2=$BASE_NAME2" >> $GITHUB_ENV
+          echo "DELETE_ALL=$DELETE_ALL" >> $GITHUB_ENV
+
+      - name: 📋 List Matching Files
+        run: |
+          echo "📋 Files matching patterns:"
+          echo ""
+          
+          # Find all matching files
+          mapfile -t FILES < <(find downloads/ -type f \( \
+            -name "${BASE_NAME}*" -o \
+            -name "${BASE_NAME2}*" \
+          \) 2>/dev/null | sort)
+          
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "❌ No matching files found!"
+            echo ""
+            echo "Files in downloads/:"
+            ls -lh downloads/ 2>/dev/null || echo "(empty)"
+            exit 0
+          fi
+          
+          echo "Found ${#FILES[@]} file(s):"
+          printf '%s\n' "${FILES[@]}"
+          echo ""
+          
+          # Save to file for next step
+          printf '%s\n' "${FILES[@]}" > /tmp/files_to_delete.txt
+          echo "FILE_COUNT=${#FILES[@]}" >> $GITHUB_ENV
+
+      - name: 🗑️ Delete Files
+        run: |
+          if [ ! -f /tmp/files_to_delete.txt ]; then
+            echo "ℹ️ Nothing to delete"
+            exit 0
+          fi
+          
+          mapfile -t FILES < /tmp/files_to_delete.txt
+          
+          echo "🗑️  Deleting ${#FILES[@]} file(s)..."
+          
+          for FILE in "${FILES[@]}"; do
+            if [ -f "$FILE" ]; then
+              echo "  🗑️  $FILE"
+              git rm "$FILE"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Files staged for deletion"
+
+      - name: 📤 Commit Deletion
+        run: |
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          
+          DELETED_COUNT=$(git diff --staged --name-only | wc -l)
+          
+          echo "📤 Committing deletion of $DELETED_COUNT file(s)..."
+          
+          git commit -m "🗑️ Delete $DELETED_COUNT file(s): ${BASE_NAME}* [skip ci]"
+          
+          git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
+          git push origin ${{ github.ref_name }}
+          
+          echo ""
+          echo "╔══════════════════════════════════╗"
+          echo "║   ✅ Deleted $DELETED_COUNT file(s)   ║"
+          echo "╚══════════════════════════════════╝"
